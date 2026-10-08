@@ -17,7 +17,7 @@ interface PrimBase {
   region: Region;
   /** Smooth-union radius (m). */
   k: number;
-  op: 'add' | 'sub' | 'intersect';
+  op: 'add' | 'sub' | 'intersect' | 'relief';
   /** Bounding sphere for culling. */
   bc: Vec3;
   br: number;
@@ -60,7 +60,54 @@ export interface Plane extends PrimBase {
   d: number;
 }
 
-export type Prim = Ellipsoid | RoundCone | RoundBox | Plane;
+/** One cross-section station of a loft (all lengths in metres). */
+export interface LoftStation {
+  /** Position along the axis, 0..1. */
+  t: number;
+  /** Lateral half-width. */
+  rx: number;
+  /** Forward (front) and backward half-depths. */
+  rf: number;
+  rb: number;
+  /** Lateral / forward centre offsets. */
+  ox?: number;
+  oz?: number;
+  /** Front taper: lateral width shrinks toward the front (0..0.6), e.g. jaw, rib cage. */
+  taper?: number;
+}
+
+/**
+ * Lofted volume: superellipse cross-sections interpolated (Catmull-Rom) along a straight axis.
+ * Lets anatomical silhouettes be specified directly as width/depth tables.
+ */
+export interface Loft extends PrimBase {
+  type: 'loft';
+  a: Vec3;
+  u: Vec3;
+  lat: Vec3;
+  fwd: Vec3;
+  length: number;
+  n: number;
+  stations: Required<LoftStation>[];
+  /** Precomputed samples (LOFT_SAMPLES+1 per channel) for fast lookup. */
+  table: Float32Array;
+}
+
+const LOFT_SAMPLES = 96;
+
+/**
+ * Relief: smooth groove (amp > 0) or ridge (amp < 0) added to the final field around a segment.
+ * Used for muscle definition on a continuous surface (tendinous lines, borders) instead of separate blobs.
+ */
+export interface Relief extends PrimBase {
+  type: 'relief';
+  a: Vec3;
+  b: Vec3;
+  amp: number;
+  sigma: number;
+}
+
+export type Prim = Ellipsoid | RoundCone | RoundBox | Plane | Loft | Relief;
 
 export const IDENTITY: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -69,7 +116,7 @@ export interface PrimOpts {
   muscle?: number;
   region?: Region;
   k?: number;
-  op?: 'add' | 'sub' | 'intersect';
+  op?: 'add' | 'sub' | 'intersect' | 'relief';
 }
 
 function base(o: PrimOpts, bc: Vec3, br: number): PrimBase {
@@ -127,6 +174,32 @@ export function roundCone(a: Vec3, b: Vec3, ra: number, rb: number, o: PrimOpts)
 export function clipPlane(point: Vec3, normal: Vec3, o: PrimOpts): Plane {
   const n = norm(normal);
   return { type: 'plane', n, d: -dot(n, point), ...base({ ...o, op: 'intersect' }, [0, 0, 0], 1e6) };
+}
+
+export function loft(a: Vec3, b: Vec3, fwdHint: Vec3, latHint: Vec3, stations: LoftStation[], o: PrimOpts, n = 2.2): Loft {
+  const ax = sub(b, a);
+  const length = len(ax);
+  const u = norm(ax);
+  const fwd = norm(sub(fwdHint, scale(u, dot(fwdHint, u))));
+  let lat = norm(cross(fwd, u));
+  if (dot(lat, latHint) < 0) lat = scale(lat, -1);
+  const st = stations
+    .map((s) => ({ ox: 0, oz: 0, taper: 0, ...s }))
+    .sort((p, q) => p.t - q.t);
+  let rmax = 0;
+  for (const s of st) rmax = Math.max(rmax, s.rx + Math.abs(s.ox), s.rf + Math.abs(s.oz), s.rb + Math.abs(s.oz));
+  const mid: Vec3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+  const table = new Float32Array((LOFT_SAMPLES + 1) * 6);
+  for (let i = 0; i <= LOFT_SAMPLES; i++) {
+    const smp = sampleStation(st, i / LOFT_SAMPLES);
+    table.set([smp.rx, smp.rf, smp.rb, smp.ox, smp.oz, smp.taper], i * 6);
+  }
+  return { type: 'loft', a, u, lat, fwd, length, n, stations: st, table, ...base(o, mid, length / 2 + rmax) };
+}
+
+export function relief(a: Vec3, b: Vec3, amp: number, sigma: number): Relief {
+  const mid: Vec3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+  return { type: 'relief', a, b, amp, sigma, ...base({ bone: -1, op: 'relief', k: 0 }, mid, len(sub(b, a)) / 2 + 3 * sigma) };
 }
 
 export function sphere(c: Vec3, r: number, o: PrimOpts): Ellipsoid {
@@ -209,6 +282,15 @@ export function primDistance(p: Prim, x: number, y: number, z: number): number {
     }
     case 'plane':
       return p.n[0] * x + p.n[1] * y + p.n[2] * z + p.d;
+    case 'loft':
+      return loftDistance(p, x, y, z);
+    case 'relief': {
+      const t = segT(p.a, p.b, x, y, z);
+      const qx = p.a[0] + (p.b[0] - p.a[0]) * t - x;
+      const qy = p.a[1] + (p.b[1] - p.a[1]) * t - y;
+      const qz = p.a[2] + (p.b[2] - p.a[2]) * t - z;
+      return p.amp * Math.exp(-(qx * qx + qy * qy + qz * qz) / (p.sigma * p.sigma));
+    }
     case 'roundBox': {
       const dx = x - p.c[0];
       const dy = y - p.c[1];
@@ -225,6 +307,133 @@ export function primDistance(p: Prim, x: number, y: number, z: number): number {
   }
 }
 
+function segT(a: Vec3, b: Vec3, x: number, y: number, z: number): number {
+  const bx = b[0] - a[0];
+  const by = b[1] - a[1];
+  const bz = b[2] - a[2];
+  const l2 = bx * bx + by * by + bz * bz;
+  if (l2 < 1e-12) return 0;
+  return Math.min(1, Math.max(0, ((x - a[0]) * bx + (y - a[1]) * by + (z - a[2]) * bz) / l2));
+}
+
+function catmull(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
+const STATION_KEYS = ['rx', 'rf', 'rb', 'ox', 'oz', 'taper'] as const;
+type StationKey = (typeof STATION_KEYS)[number];
+
+/** Sample the interpolated station at t (clamped). */
+export function sampleStation(st: Required<LoftStation>[], t: number): Record<StationKey, number> {
+  const n = st.length;
+  const out = { rx: 0, rf: 0, rb: 0, ox: 0, oz: 0, taper: 0 };
+  if (n === 1 || t <= st[0]!.t) {
+    for (const k of STATION_KEYS) out[k] = st[0]![k];
+    return out;
+  }
+  if (t >= st[n - 1]!.t) {
+    for (const k of STATION_KEYS) out[k] = st[n - 1]![k];
+    return out;
+  }
+  let i = 0;
+  while (i < n - 2 && t > st[i + 1]!.t) i++;
+  const s0 = st[Math.max(0, i - 1)]!;
+  const s1 = st[i]!;
+  const s2 = st[i + 1]!;
+  const s3 = st[Math.min(n - 1, i + 2)]!;
+  const f = (t - s1.t) / (s2.t - s1.t);
+  for (const k of STATION_KEYS) out[k] = Math.max(k === 'ox' || k === 'oz' ? -1 : 0, catmull(s0[k], s1[k], s2[k], s3[k], f));
+  return out;
+}
+
+function superRadius(cx: number, cz: number, rx: number, rz: number, n: number): number {
+  if (n === 2) {
+    const a = (cx * cx) / (rx * rx) + (cz * cz) / (rz * rz);
+    return a > 0 ? 1 / Math.sqrt(a) : Math.min(rx, rz);
+  }
+  const a = Math.pow(Math.abs(cx) / rx, n) + Math.pow(Math.abs(cz) / rz, n);
+  return a > 0 ? Math.pow(a, -1 / n) : Math.min(rx, rz);
+}
+
+const SEC = { rx: 0, rf: 0, rb: 0, ox: 0, oz: 0, taper: 0 };
+
+function lookup(p: Loft, t: number, out: typeof SEC): typeof SEC {
+  const f = Math.min(1, Math.max(0, t)) * LOFT_SAMPLES;
+  const i = Math.min(LOFT_SAMPLES - 1, Math.floor(f));
+  const w = f - i;
+  const T = p.table;
+  const a = i * 6;
+  const b = a + 6;
+  out.rx = T[a]! + (T[b]! - T[a]!) * w;
+  out.rf = T[a + 1]! + (T[b + 1]! - T[a + 1]!) * w;
+  out.rb = T[a + 2]! + (T[b + 2]! - T[a + 2]!) * w;
+  out.ox = T[a + 3]! + (T[b + 3]! - T[a + 3]!) * w;
+  out.oz = T[a + 4]! + (T[b + 4]! - T[a + 4]!) * w;
+  out.taper = T[a + 5]! + (T[b + 5]! - T[a + 5]!) * w;
+  return out;
+}
+
+function sectionRadius(s: typeof SEC, cx: number, cz: number, n: number): number {
+  const rz = cz >= 0 ? s.rf : s.rb;
+  let r = superRadius(cx, cz, s.rx, rz, n);
+  if (s.taper > 0 && cz > 0) {
+    const zf = Math.min(1, (cz * r) / s.rf);
+    r = superRadius(cx, cz, s.rx * (1 - s.taper * zf * zf), rz, n);
+  }
+  return r;
+}
+
+/** Point on a loft surface at axis parameter t and section angle (0 = +lat, PI/2 = +fwd), pushed `inset` inward. */
+export function loftSurfacePoint(p: Loft, t: number, angle: number, inset = 0): Vec3 {
+  const s = lookup(p, t, { ...SEC });
+  const cx = Math.cos(angle);
+  const cz = Math.sin(angle);
+  const r = sectionRadius(s, cx, cz, p.n) - inset;
+  const lx = s.ox + cx * r;
+  const lz = s.oz + cz * r;
+  const d = t * p.length;
+  return [
+    p.a[0] + p.u[0] * d + p.lat[0] * lx + p.fwd[0] * lz,
+    p.a[1] + p.u[1] * d + p.lat[1] * lx + p.fwd[1] * lz,
+    p.a[2] + p.u[2] * d + p.lat[2] * lx + p.fwd[2] * lz,
+  ];
+}
+
+const S0 = { ...SEC };
+const S1 = { ...SEC };
+const S2 = { ...SEC };
+
+function loftDistance(p: Loft, x: number, y: number, z: number): number {
+  const vx = x - p.a[0];
+  const vy = y - p.a[1];
+  const vz = z - p.a[2];
+  const along = vx * p.u[0] + vy * p.u[1] + vz * p.u[2];
+  const t = along / p.length;
+  const tc = Math.min(1, Math.max(0, t));
+  const s = lookup(p, tc, S0);
+  const lx = vx * p.lat[0] + vy * p.lat[1] + vz * p.lat[2] - s.ox;
+  const lz = vx * p.fwd[0] + vy * p.fwd[1] + vz * p.fwd[2] - s.oz;
+  const rho = Math.hypot(lx, lz);
+  let radial: number;
+  if (rho < 1e-9) radial = -Math.min(s.rx, s.rf, s.rb);
+  else {
+    const cx = lx / rho;
+    const cz = lz / rho;
+    const r = sectionRadius(s, cx, cz, p.n);
+    const dt = 0.012;
+    const ta = Math.min(1, tc + dt);
+    const tb = Math.max(0, tc - dt);
+    const g = (sectionRadius(lookup(p, ta, S1), cx, cz, p.n) - sectionRadius(lookup(p, tb, S2), cx, cz, p.n)) / ((ta - tb) * p.length);
+    radial = (rho - r) / Math.sqrt(1 + g * g);
+  }
+  const over = t < 0 ? -t * p.length : t > 1 ? (t - 1) * p.length : 0;
+  if (over <= 0) return radial;
+  const rp = Math.max(radial, 0);
+  return Math.sqrt(rp * rp + over * over) + Math.min(Math.max(radial, over), 0);
+}
+
 /** Polynomial smooth minimum (exact `min` when |a-b| >= k). */
 export function smin(a: number, b: number, k: number): number {
   if (k <= 0) return Math.min(a, b);
@@ -236,9 +445,16 @@ export function smin(a: number, b: number, k: number): number {
 export function evalField(prims: readonly Prim[], cand: ArrayLike<number>, x: number, y: number, z: number): number {
   let d = 1e9;
   let any = false;
+  let groove = 0;
+  let ridge = 0;
   for (let i = 0; i < cand.length; i++) {
     const p = prims[cand[i]!]!;
     const di = primDistance(p, x, y, z);
+    if (p.op === 'relief') {
+      if (di > groove) groove = di;
+      else if (di < ridge) ridge = di;
+      continue;
+    }
     if (p.op === 'add') {
       d = any ? smin(d, di, p.k) : di;
       any = true;
@@ -250,7 +466,7 @@ export function evalField(prims: readonly Prim[], cand: ArrayLike<number>, x: nu
       d = -smin(-d, -di, p.k);
     }
   }
-  return d;
+  return d + groove + ridge;
 }
 
 /** Minimal distance from point to bounding sphere surface (negative inside). */

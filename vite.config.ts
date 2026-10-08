@@ -17,7 +17,7 @@ export default defineConfig({
   },
   worker: { format: 'es' },
   test: {
-    include: ['tests/unit/**/*.test.ts'],
+    include: process.env.VITEST_INCLUDE ? process.env.VITEST_INCLUDE.split(',') : ['tests/unit/**/*.test.ts'],
     environment: 'node',
   },
 });

@@ -50,7 +50,7 @@ function App() {
       if (cancelled || !host.current) return;
       const q = tier ?? mod.autoTier();
       if (!tier) setTier(q);
-      v = new mod.ExerciseViewer(host.current, { tier: q, theme });
+      v = new mod.ExerciseViewer(host.current, { tier: q, theme, material: params.get('mode') === 'clay' ? 'clay' : 'final' });
       viewer.current = v;
       unsub = v.subscribe(setState);
       (window as unknown as { __viewer?: ExerciseViewer; __animations?: unknown }).__viewer = v;

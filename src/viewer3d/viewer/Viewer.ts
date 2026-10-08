@@ -78,7 +78,7 @@ export class ExerciseViewer {
 
   constructor(
     private container: HTMLElement,
-    private opts: { tier: QualityTier; theme: Theme },
+    private opts: { tier: QualityTier; theme: Theme; material?: 'final' | 'clay' },
   ) {
     const q = qualitySettings(opts.tier);
     this.renderer = new WebGLRenderer({ antialias: q.antialias, powerPreference: 'high-performance', preserveDrawingBuffer: false });
@@ -187,7 +187,7 @@ export class ExerciseViewer {
     const t0 = performance.now();
     const data = await loadCharacter(q.character);
     if (this.disposed) return;
-    this.character = buildCharacter(data);
+    this.character = buildCharacter(data, this.opts.material ?? 'final');
     this.character.setHighlight(this.highlight.map, this.highlight.enabled);
     this.scene.add(this.character.root);
     this.emit({ ready: true, generationMs: Math.round(performance.now() - t0), vertices: data.stats.vertices });

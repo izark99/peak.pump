@@ -1,15 +1,16 @@
-import { MUSCLE_IDS } from '@shared/catalog/muscles';
+import { MUSCLE_IDS, muscleIndex } from '@shared/catalog/muscles';
 import { polygonize, type MeshResult } from '../sdf/mesher';
 import { evalField, primDistance, type Prim, type Region, type Vec3 } from '../sdf/primitives';
-import { BONES, bodyPrims, handPrims, headPrims, isHair } from './anatomy';
+import { BONES, handPrims, headPrims, isHair } from './anatomy';
+import { bodyBoneProxies, bodyShape, muscleLabels, shoePrims, shortsShape, type BoneProxy, type MuscleLabel } from './body';
 
 /**
  * Generates the character's skinned mesh data (pure data, transferable from a Worker).
  */
 
-export const GENERATOR_VERSION = 1;
+export const GENERATOR_VERSION = 2;
 
-export const REGION_CODES: Record<Region | 'hair', number> = {
+export const REGION_CODES: Record<Region, number> = {
   skin: 0,
   shorts: 1,
   shoe: 2,
@@ -19,8 +20,11 @@ export const REGION_CODES: Record<Region | 'hair', number> = {
   hair: 6,
 };
 
+export type PartMaterial = 'skin' | 'cloth' | 'shoe' | 'hair';
+
 export interface PartData {
-  name: 'body' | 'head' | 'hand_L' | 'hand_R';
+  name: string;
+  material: PartMaterial;
   positions: Float32Array;
   normals: Float32Array;
   indices: Uint32Array;
@@ -49,9 +53,9 @@ export interface CharacterQuality {
 }
 
 export const QUALITY_PRESETS: Record<'low' | 'medium' | 'high', CharacterQuality> = {
-  low: { bodyCell: 0.014, headCell: 0.0055, handCell: 0.0042 },
-  medium: { bodyCell: 0.0105, headCell: 0.0042, handCell: 0.0031 },
-  high: { bodyCell: 0.0082, headCell: 0.0034, handCell: 0.0025 },
+  low: { bodyCell: 0.013, headCell: 0.005, handCell: 0.0042 },
+  medium: { bodyCell: 0.0095, headCell: 0.0038, handCell: 0.0031 },
+  high: { bodyCell: 0.0075, headCell: 0.003, handCell: 0.0025 },
 };
 
 function boundsOf(prims: readonly Prim[], pad: number): { min: Vec3; max: Vec3 } {
@@ -69,11 +73,29 @@ function boundsOf(prims: readonly Prim[], pad: number): { min: Vec3; max: Vec3 }
 
 const AO_STEPS = [0.006, 0.013, 0.026, 0.045];
 
-interface AttrOptions {
-  aoStrength: number;
-  tau: number;
+interface PartSpec {
+  name: string;
+  material: PartMaterial;
+  prims: Prim[];
+  post?: (d: number, x: number, y: number, z: number) => number;
+  cell: number;
+  /** 'prims': weights from owning primitives (hands, head); 'proxies': from bone segments. */
+  weights: { mode: 'prims'; tau: number } | { mode: 'proxies'; proxies: BoneProxy[]; tau: number };
   smoothIterations: number;
+  labels?: MuscleLabel[];
+  defaultRegion?: Region;
   hair?: boolean;
+  aoStrength: number;
+  occluders: Prim[];
+}
+
+function segDist(a: Vec3, b: Vec3, x: number, y: number, z: number): number {
+  const bx = b[0] - a[0];
+  const by = b[1] - a[1];
+  const bz = b[2] - a[2];
+  const l2 = bx * bx + by * by + bz * bz;
+  const t = l2 > 0 ? Math.min(1, Math.max(0, ((x - a[0]) * bx + (y - a[1]) * by + (z - a[2]) * bz) / l2)) : 0;
+  return Math.hypot(a[0] + bx * t - x, a[1] + by * t - y, a[2] + bz * t - z);
 }
 
 function buildAdjacency(vcount: number, indices: Uint32Array): { offs: Int32Array; nbrs: Int32Array } {
@@ -96,7 +118,8 @@ function buildAdjacency(vcount: number, indices: Uint32Array): { offs: Int32Arra
   return { offs, nbrs };
 }
 
-export function computeAttributes(name: PartData['name'], prims: readonly Prim[], mesh: MeshResult, opt: AttrOptions): PartData {
+function computeAttributes(spec: PartSpec, mesh: MeshResult): PartData {
+  const prims = spec.prims;
   const V = mesh.positions.length / 3;
   const B = BONES.length;
   const M = MUSCLE_IDS.length;
@@ -107,16 +130,20 @@ export function computeAttributes(name: PartData['name'], prims: readonly Prim[]
   const muscleBW = new Float32Array(V);
   const region = new Uint8Array(V);
   const ao = new Float32Array(V);
-  const allPrims = Int32Array.from(prims.map((_, i) => i));
+  const occ = spec.occluders;
+  const occIdx = Int32Array.from(occ.map((_, i) => i));
   const mdist = new Float64Array(M);
+  const labelMuscle = spec.labels?.map((l) => muscleIndex(l.muscle)) ?? [];
 
   for (let v = 0; v < V; v++) {
     const x = mesh.positions[v * 3]!;
     const y = mesh.positions[v * 3 + 1]!;
     const z = mesh.positions[v * 3 + 2]!;
     const cand = mesh.candidates[mesh.vertexCand[v]!]!;
+
+    // ---- region: nearest primitive with an explicit region (shoes, lips, nails)
     let dmin = Infinity;
-    let regionPrim: Prim | undefined;
+    let regionOf: Region = spec.defaultRegion ?? 'skin';
     const ds = new Float64Array(cand.length);
     mdist.fill(Infinity);
     for (let c = 0; c < cand.length; c++) {
@@ -126,41 +153,72 @@ export function computeAttributes(name: PartData['name'], prims: readonly Prim[]
       ds[c] = d;
       if (d < dmin) {
         dmin = d;
-        regionPrim = p;
+        if (p.region !== 'skin') regionOf = p.region;
+        else regionOf = spec.defaultRegion ?? 'skin';
       }
-      if (p.muscle >= 0 && d < mdist[p.muscle]!) mdist[p.muscle] = d;
+      if (!spec.labels && p.muscle >= 0 && d < mdist[p.muscle]!) mdist[p.muscle] = d;
     }
-    // skin weights from soft ownership of primitives
-    let wsum = 0;
-    for (let c = 0; c < cand.length; c++) {
-      const p = prims[cand[c]!]!;
-      if (p.op !== 'add' || p.bone < 0) continue;
-      const w = Math.exp(-Math.max(0, ds[c]! - dmin) / opt.tau);
-      dense[v * B + p.bone] = dense[v * B + p.bone]! + w;
-      wsum += w;
-    }
-    if (wsum > 0) for (let b = 0; b < B; b++) dense[v * B + b] = dense[v * B + b]! / wsum;
 
-    // muscles: strength fades with depth below the surface and with distance to the winner
-    let best = Infinity;
-    for (let mm = 0; mm < M; mm++) best = Math.min(best, mdist[mm]!);
+    // ---- skin weights
+    const w = spec.weights;
+    if (w.mode === 'proxies') {
+      let emin = Infinity;
+      const es = w.proxies.map((pr) => {
+        const e = segDist(pr.a, pr.b, x, y, z) - pr.r;
+        if (e < emin) emin = e;
+        return e;
+      });
+      let sum = 0;
+      w.proxies.forEach((pr, i) => {
+        const ww = Math.exp(-(es[i]! - emin) / w.tau);
+        dense[v * B + pr.bone] = dense[v * B + pr.bone]! + ww;
+        sum += ww;
+      });
+      for (let b = 0; b < B; b++) dense[v * B + b] = dense[v * B + b]! / sum;
+    } else {
+      let wsum = 0;
+      for (let c = 0; c < cand.length; c++) {
+        const p = prims[cand[c]!]!;
+        if (p.op !== 'add' || p.bone < 0) continue;
+        const ww = Math.exp(-Math.max(0, ds[c]! - dmin) / w.tau);
+        dense[v * B + p.bone] = dense[v * B + p.bone]! + ww;
+        wsum += ww;
+      }
+      if (wsum > 0) for (let b = 0; b < B; b++) dense[v * B + b] = dense[v * B + b]! / wsum;
+    }
+
+    // ---- muscles (labels are separate volumes; geometry is never affected)
     let aI = -1;
     let aW = 0;
     let bI = -1;
     let bW = 0;
-    for (let mm = 0; mm < M; mm++) {
-      const d = mdist[mm]!;
-      if (!Number.isFinite(d)) continue;
-      const depth = Math.max(0, d - dmin);
-      const s = Math.pow(Math.max(0, 1 - depth / 0.03), 1.5) * Math.exp(-(d - best) / 0.008);
+    const consider = (mm: number, s: number) => {
       if (s > aW) {
-        bI = aI;
-        bW = aW;
+        if (aI !== mm) {
+          bI = aI;
+          bW = aW;
+        }
         aI = mm;
         aW = s;
-      } else if (s > bW) {
+      } else if (s > bW && mm !== aI) {
         bI = mm;
         bW = s;
+      }
+    };
+    if (spec.labels) {
+      spec.labels.forEach((l, i) => {
+        const d = primDistance(l.prim, x, y, z);
+        const s = Math.max(0, Math.min(1, 1 - Math.max(0, d) / 0.014));
+        if (s > 0) consider(labelMuscle[i]!, s);
+      });
+    } else {
+      let best = Infinity;
+      for (let mm = 0; mm < M; mm++) best = Math.min(best, mdist[mm]!);
+      for (let mm = 0; mm < M; mm++) {
+        const d = mdist[mm]!;
+        if (!Number.isFinite(d)) continue;
+        const depth = Math.max(0, d - dmin);
+        consider(mm, Math.pow(Math.max(0, 1 - depth / 0.03), 1.5) * Math.exp(-(d - best) / 0.008));
       }
     }
     muscleA[v] = aI + 1;
@@ -168,30 +226,31 @@ export function computeAttributes(name: PartData['name'], prims: readonly Prim[]
     muscleB[v] = bI + 1;
     muscleBW[v] = bW;
 
-    let rc = REGION_CODES[regionPrim?.region ?? 'skin'];
-    if (opt.hair && rc === 0 && isHair(x, y, z)) rc = REGION_CODES.hair;
+    let rc = REGION_CODES[regionOf];
+    if (spec.hair && rc === 0 && isHair(x, y, z)) rc = REGION_CODES.hair;
     region[v] = rc;
 
-    // SDF ambient occlusion: sample along the normal
-    const nx = mesh.normals[v * 3]!;
-    const ny = mesh.normals[v * 3 + 1]!;
-    const nz = mesh.normals[v * 3 + 2]!;
-    let occ = 0;
-    let wgt = 1;
-    for (const dlt of AO_STEPS) {
-      const f = evalField(prims, allPrims, x + nx * dlt, y + ny * dlt, z + nz * dlt);
-      occ += (wgt * Math.max(0, dlt - f)) / dlt;
-      wgt *= 0.5;
-    }
-    ao[v] = Math.max(0.42, Math.min(1, 1 - occ * opt.aoStrength));
+    // ---- SDF ambient occlusion along the normal (against all occluders)
+    if (spec.aoStrength > 0) {
+      const nx = mesh.normals[v * 3]!;
+      const ny = mesh.normals[v * 3 + 1]!;
+      const nz = mesh.normals[v * 3 + 2]!;
+      let o = 0;
+      let wgt = 1;
+      for (const dlt of AO_STEPS) {
+        const f = evalField(occ, occIdx, x + nx * dlt, y + ny * dlt, z + nz * dlt);
+        o += (wgt * Math.max(0, dlt - f)) / dlt;
+        wgt *= 0.5;
+      }
+      ao[v] = Math.max(0.6, Math.min(1, 1 - o * spec.aoStrength));
+    } else ao[v] = 1;
   }
 
-  // Laplacian smoothing of skin weights across the surface (wider, smoother joint blends)
-  if (opt.smoothIterations > 0) {
+  if (spec.smoothIterations > 0) {
     const { offs, nbrs } = buildAdjacency(V, mesh.indices);
     let src = dense;
     let dst = new Float32Array(V * B);
-    for (let it = 0; it < opt.smoothIterations; it++) {
+    for (let it = 0; it < spec.smoothIterations; it++) {
       for (let v = 0; v < V; v++) {
         const n0 = offs[v]!;
         const n1 = offs[v + 1]!;
@@ -209,15 +268,13 @@ export function computeAttributes(name: PartData['name'], prims: readonly Prim[]
     dense.set(src);
   }
 
-  // top-4 bones
   const skinIndex = new Uint16Array(V * 4);
   const skinWeight = new Float32Array(V * 4);
   for (let v = 0; v < V; v++) {
     const top: [number, number][] = [];
     for (let b = 0; b < B; b++) {
-      const w = dense[v * B + b]!;
-      if (w <= 1e-4) continue;
-      top.push([b, w]);
+      const ww = dense[v * B + b]!;
+      if (ww > 1e-4) top.push([b, ww]);
     }
     top.sort((p, q) => q[1] - p[1]);
     let s = 0;
@@ -231,7 +288,8 @@ export function computeAttributes(name: PartData['name'], prims: readonly Prim[]
   }
 
   return {
-    name,
+    name: spec.name,
+    material: spec.material,
     positions: mesh.positions,
     normals: mesh.normals,
     indices: mesh.indices,
@@ -246,20 +304,32 @@ export function computeAttributes(name: PartData['name'], prims: readonly Prim[]
   };
 }
 
-function part(name: PartData['name'], prims: Prim[], h: number, opt: AttrOptions): PartData {
-  const b = boundsOf(prims, 2 * h);
-  const mesh = polygonize(prims, { min: b.min, max: b.max, h });
-  return computeAttributes(name, prims, mesh, opt);
+export function part(spec: PartSpec): PartData {
+  const b = boundsOf(spec.prims, 2 * spec.cell + 0.03);
+  const mesh = polygonize(spec.prims, { min: b.min, max: b.max, h: spec.cell, post: spec.post });
+  return computeAttributes(spec, mesh);
+}
+
+export function characterParts(q: CharacterQuality): PartSpec[] {
+  const body = bodyShape();
+  const proxies = bodyBoneProxies();
+  const head = headPrims();
+  const shorts = shortsShape();
+  const occluders = [...bodyShape({ relief: false })];
+  return [
+    { name: 'body', material: 'skin', prims: body, cell: q.bodyCell, weights: { mode: 'proxies', proxies, tau: 0.018 }, smoothIterations: 4, labels: muscleLabels(), aoStrength: 0.35, occluders: body },
+    { name: 'head', material: 'skin', prims: head, cell: q.headCell, weights: { mode: 'prims', tau: 0.01 }, smoothIterations: 2, hair: true, aoStrength: 0.35, occluders: head },
+    { name: 'hand_L', material: 'skin', prims: handPrims('L'), cell: q.handCell, weights: { mode: 'prims', tau: 0.003 }, smoothIterations: 2, aoStrength: 0.3, occluders: handPrims('L') },
+    { name: 'hand_R', material: 'skin', prims: handPrims('R'), cell: q.handCell, weights: { mode: 'prims', tau: 0.003 }, smoothIterations: 2, aoStrength: 0.3, occluders: handPrims('R') },
+    { name: 'shorts', material: 'cloth', prims: shorts.prims, post: shorts.post, cell: q.bodyCell * 0.8, weights: { mode: 'proxies', proxies, tau: 0.018 }, smoothIterations: 6, defaultRegion: 'shorts', aoStrength: 0.25, occluders: shorts.prims.filter((p) => p.op === 'add') },
+    { name: 'shoe_L', material: 'shoe', prims: shoePrims('L'), cell: q.handCell * 1.6, weights: { mode: 'proxies', proxies, tau: 0.012 }, smoothIterations: 2, defaultRegion: 'shoe', aoStrength: 0.2, occluders: shoePrims('L') },
+    { name: 'shoe_R', material: 'shoe', prims: shoePrims('R'), cell: q.handCell * 1.6, weights: { mode: 'proxies', proxies, tau: 0.012 }, smoothIterations: 2, defaultRegion: 'shoe', aoStrength: 0.2, occluders: shoePrims('R') },
+  ].map((p) => ({ ...p, occluders: p.occluders.length ? p.occluders : occluders })) as PartSpec[];
 }
 
 export function generateCharacter(q: CharacterQuality): CharacterData {
   const t0 = performance.now();
-  const parts: PartData[] = [
-    part('body', bodyPrims(), q.bodyCell, { tau: 0.012, smoothIterations: 4, aoStrength: 0.55 }),
-    part('head', headPrims(), q.headCell, { tau: 0.01, smoothIterations: 2, hair: true, aoStrength: 0.45 }),
-    part('hand_L', handPrims('L'), q.handCell, { tau: 0.003, smoothIterations: 2, aoStrength: 0.35 }),
-    part('hand_R', handPrims('R'), q.handCell, { tau: 0.003, smoothIterations: 2, aoStrength: 0.35 }),
-  ];
+  const parts = characterParts(q).map(part);
   let vertices = 0;
   let triangles = 0;
   for (const p of parts) {

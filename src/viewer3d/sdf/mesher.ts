@@ -1,4 +1,4 @@
-import { boundDistance, evalField, type Prim, type Vec3 } from './primitives';
+import { boundDistance, evalField as rawField, type Prim, type Vec3 } from './primitives';
 
 /**
  * Narrow-band Surface Nets polygonizer for a set of SDF primitives.
@@ -21,12 +21,18 @@ export interface MeshOptions {
   max: Vec3;
   /** Fine cell size (m). */
   h: number;
+  /** Optional field post-process (offset / clipping) applied after primitive evaluation. */
+  post?: (d: number, x: number, y: number, z: number) => number;
 }
 
 const C = 4; // fine cells per coarse cell
 
 export function polygonize(prims: readonly Prim[], opts: MeshOptions): MeshResult {
   const { h } = opts;
+  const post = opts.post;
+  const evalField = post
+    ? (pr: readonly Prim[], c: ArrayLike<number>, x: number, y: number, z: number) => post(rawField(pr, c, x, y, z), x, y, z)
+    : rawField;
   const min = opts.min;
   const ncx = Math.max(1, Math.ceil((opts.max[0] - min[0]) / (h * C)));
   const ncy = Math.max(1, Math.ceil((opts.max[1] - min[1]) / (h * C)));
@@ -71,7 +77,8 @@ export function polygonize(prims: readonly Prim[], opts: MeshOptions): MeshResul
         const list: number[] = [];
         for (let p = 0; p < prims.length; p++) {
           const pr = prims[p]!;
-          if (boundDistance(pr, cx, cy, cz) <= diag / 2 + pr.k + band) list.push(p);
+          const reach = pr.op === 'relief' ? 0 : pr.k;
+          if (boundDistance(pr, cx, cy, cz) <= diag / 2 + reach + band + (post ? 0.03 : 0)) list.push(p);
         }
         if (list.length === 0) continue;
         cellCand[i + ncx * (j + ncy * k)] = candidates.length;
@@ -195,16 +202,22 @@ export function polygonize(prims: readonly Prim[], opts: MeshOptions): MeshResul
     let gx = 0;
     let gy = 0;
     let gz = 0;
+    // tetrahedral gradient (4 evaluations) + 2 Newton steps toward the zero set
+    const k1 = e;
     for (let it = 0; it < 3; it++) {
-      const d = evalField(prims, cand, x, y, z);
-      gx = evalField(prims, cand, x + e, y, z) - evalField(prims, cand, x - e, y, z);
-      gy = evalField(prims, cand, x, y + e, z) - evalField(prims, cand, x, y - e, z);
-      gz = evalField(prims, cand, x, y, z + e) - evalField(prims, cand, x, y, z - e);
+      const f0 = evalField(prims, cand, x + k1, y - k1, z - k1);
+      const f1 = evalField(prims, cand, x - k1, y - k1, z + k1);
+      const f2 = evalField(prims, cand, x - k1, y + k1, z - k1);
+      const f3 = evalField(prims, cand, x + k1, y + k1, z + k1);
+      gx = f0 - f1 - f2 + f3;
+      gy = -f0 - f1 + f2 + f3;
+      gz = -f0 + f1 - f2 + f3;
       const gl = Math.hypot(gx, gy, gz) || 1;
       gx /= gl;
       gy /= gl;
       gz /= gl;
       if (it === 2) break;
+      const d = (f0 + f1 + f2 + f3) * 0.25;
       const step = Math.max(-h * 0.5, Math.min(h * 0.5, d));
       x -= gx * step;
       y -= gy * step;

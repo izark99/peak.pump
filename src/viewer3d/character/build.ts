@@ -43,17 +43,6 @@ const REGION_COLORS: Record<number, Color> = {
   [REGION_CODES.hair]: srgb(0x231a15),
 };
 
-/** Material slot per region. */
-const SLOT: Record<number, number> = {
-  [REGION_CODES.skin]: 0,
-  [REGION_CODES.lip]: 0,
-  [REGION_CODES.nail]: 0,
-  [REGION_CODES.shorts]: 1,
-  [REGION_CODES.hair]: 1,
-  [REGION_CODES.sole]: 1,
-  [REGION_CODES.shoe]: 2,
-};
-
 export interface CharacterObject {
   root: Group;
   skeleton: Skeleton;
@@ -64,30 +53,11 @@ export interface CharacterObject {
   dispose(): void;
 }
 
-function groupByMaterial(p: PartData): { index: Uint32Array; groups: { start: number; count: number; slot: number }[] } {
-  const tris: number[][] = [[], [], []];
-  const T = p.indices.length / 3;
-  for (let t = 0; t < T; t++) {
-    const a = p.indices[t * 3]!;
-    const b = p.indices[t * 3 + 1]!;
-    const c = p.indices[t * 3 + 2]!;
-    const slots = [SLOT[p.region[a]!] ?? 0, SLOT[p.region[b]!] ?? 0, SLOT[p.region[c]!] ?? 0];
-    const slot = slots[0] === slots[1] || slots[0] === slots[2] ? slots[0]! : slots[1]!;
-    tris[slot]!.push(a, b, c);
-  }
-  const index = new Uint32Array(p.indices.length);
-  const groups: { start: number; count: number; slot: number }[] = [];
-  let off = 0;
-  tris.forEach((list, slot) => {
-    if (!list.length) return;
-    index.set(list, off);
-    groups.push({ start: off, count: list.length, slot });
-    off += list.length;
-  });
-  return { index, groups };
-}
+export type MaterialMode = 'final' | 'clay';
 
-export function buildCharacter(data: CharacterData): CharacterObject {
+const CLAY = srgb(0xb4b6b8);
+
+export function buildCharacter(data: CharacterData, mode: MaterialMode = 'final'): CharacterObject {
   // skeleton (identity bind orientations, positions relative to parent)
   const bones: Bone[] = BONES.map((b) => {
     const bone = new Bone();
@@ -111,33 +81,35 @@ export function buildCharacter(data: CharacterData): CharacterObject {
   root.updateMatrixWorld(true);
   const skeleton = new Skeleton(bones);
 
-  const skin = new MeshPhysicalMaterial({
-    vertexColors: true,
-    roughness: 0.52,
-    metalness: 0,
-    sheen: 0.35,
-    sheenRoughness: 0.6,
-    sheenColor: new Color(0xffd2bd),
-    clearcoat: 0.08,
-    clearcoatRoughness: 0.6,
-  });
-  const matte = new MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
-  const shoe = new MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0 });
-  const materials: Material[] = [skin, matte, shoe];
+  const materials: Record<string, Material> =
+    mode === 'clay'
+      ? { skin: new MeshStandardMaterial({ vertexColors: true, roughness: 0.62, metalness: 0 }) }
+      : {
+          skin: new MeshPhysicalMaterial({
+            vertexColors: true,
+            roughness: 0.58,
+            metalness: 0,
+            sheen: 0.12,
+            sheenRoughness: 0.8,
+            sheenColor: new Color(0xffc9b0),
+          }),
+          cloth: new MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 }),
+          shoe: new MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0 }),
+          hair: new MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 }),
+        };
+  const matFor = (m: string) => materials[m] ?? materials.skin!;
 
   const parts: { mesh: SkinnedMesh; data: PartData; colors: Float32Array; ao: Float32Array }[] = [];
   for (const p of data.parts) {
     const geo = new BufferGeometry();
-    const { index, groups } = groupByMaterial(p);
     geo.setAttribute('position', new BufferAttribute(p.positions, 3));
     geo.setAttribute('normal', new BufferAttribute(p.normals, 3));
     geo.setAttribute('skinIndex', new BufferAttribute(p.skinIndex, 4));
     geo.setAttribute('skinWeight', new BufferAttribute(p.skinWeight, 4));
     const colors = new Float32Array(p.positions.length);
     geo.setAttribute('color', new BufferAttribute(colors, 3));
-    geo.setIndex(new BufferAttribute(index, 1));
-    for (const g of groups) geo.addGroup(g.start, g.count, g.slot);
-    const mesh = new SkinnedMesh(geo, materials);
+    geo.setIndex(new BufferAttribute(p.indices, 1));
+    const mesh = new SkinnedMesh(geo, matFor(p.material));
     mesh.name = p.name;
     mesh.frustumCulled = false;
     mesh.castShadow = true;
@@ -160,7 +132,8 @@ export function buildCharacter(data: CharacterData): CharacterObject {
     eyeColors.set([c.r, c.g, c.b], i * 3);
   }
   eyeGeo.setAttribute('color', new BufferAttribute(eyeColors, 3));
-  const eyeMat = new MeshPhysicalMaterial({ vertexColors: true, roughness: 0.25, clearcoat: 1, clearcoatRoughness: 0.05 });
+  if (mode === 'clay') eyeColors.fill(CLAY.r);
+  const eyeMat = new MeshPhysicalMaterial({ vertexColors: true, roughness: mode === 'clay' ? 0.62 : 0.25, clearcoat: mode === 'clay' ? 0 : 1, clearcoatRoughness: 0.05 });
   const headBone = byName.get('head')!;
   const headHead = BONES.find((b) => b.name === 'head')!.head;
   for (const side of SIDES) {
@@ -188,7 +161,7 @@ export function buildCharacter(data: CharacterData): CharacterObject {
     for (const { data: p, colors, ao, mesh } of parts) {
       const V = p.positions.length / 3;
       for (let v = 0; v < V; v++) {
-        const base = REGION_COLORS[p.region[v]!] ?? REGION_COLORS[0]!;
+        const base = mode === 'clay' ? CLAY : (REGION_COLORS[p.region[v]!] ?? REGION_COLORS[0]!);
         let r = base.r;
         let g = base.g;
         let b = base.b;
@@ -211,7 +184,7 @@ export function buildCharacter(data: CharacterData): CharacterObject {
           g += (secondary.g - g) * t;
           b += (secondary.b - b) * t;
         }
-        const o = ao[v]!;
+        const o = mode === 'clay' ? 1 : ao[v]!;
         colors[v * 3] = r * o;
         colors[v * 3 + 1] = g * o;
         colors[v * 3 + 2] = b * o;
@@ -242,7 +215,7 @@ export function buildCharacter(data: CharacterData): CharacterObject {
       for (const p of parts) p.mesh.geometry.dispose();
       eyeGeo.dispose();
       eyeMat.dispose();
-      for (const m of materials) m.dispose();
+      for (const m of Object.values(materials)) m.dispose();
       skeleton.dispose();
     },
   };

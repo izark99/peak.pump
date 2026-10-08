@@ -122,7 +122,7 @@ export function fingerChain(side: Side, f: Finger) {
   return { dir, joints, ref, radius: spec.radius };
 }
 
-function legFrame(side: Side) {
+export function legFrame(side: Side) {
   const s = sideSign(side);
   const H = DIM.hip(s);
   const K = DIM.knee(s);

@@ -7,8 +7,8 @@ const page = await browser.newPage({ viewport: { width: 900, height: 1100 }, dev
 page.on('console', (m) => { if (m.type() === 'error') console.log('console error:', m.text()); });
 page.on('pageerror', (e) => console.log('page error:', e.message));
 for (const spec of specs) {
-  const [ex, frac = '0', view = 'reset', theme = 'light', quality = 'medium'] = spec.split(':');
-  await page.goto(`${base}/prototype-3d.html?exercise=${ex}&theme=${theme}&quality=${quality}`);
+  const [ex, frac = '0', view = 'reset', theme = 'light', quality = 'medium', mode = 'final', name] = spec.split(':');
+  await page.goto(`${base}/prototype-3d.html?exercise=${ex}&theme=${theme}&quality=${quality}&mode=${mode}`);
   await page.waitForFunction(() => window.__viewer?.state?.ready, null, { timeout: 120000 });
   await page.waitForTimeout(300);
   await page.evaluate(([f, v]) => {
@@ -17,7 +17,7 @@ for (const spec of specs) {
     w.seek(Number(f)); w.renderNow();
   }, [frac, view]);
   await page.waitForTimeout(200);
-  const file = `${out}/${ex}_${frac}_${view.replace(/[^a-z0-9.]/gi, '')}_${theme}.png`;
+  const file = name ? `${out}/${name}.png` : `${out}/${ex}_${frac}_${view.replace(/[^a-z0-9.]/gi, '')}_${theme}_${mode}.png`;
   await page.locator('[data-testid=viewer]').screenshot({ path: file });
   const contacts = await page.evaluate(() => window.__viewer.lastContacts);
   console.log(file, JSON.stringify(contacts.map((c) => [c.name, +c.error.toFixed(4)])));
