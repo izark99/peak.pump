@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+*.local
+backups/
+*.sql.backup
+test-results/
+playwright-report/
