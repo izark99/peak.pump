@@ -1,6 +1,6 @@
 # EXERCISE SOURCES — Thư viện ~40 bài (đề xuất CỔNG DUYỆT 1)
 
-Trạng thái: **ĐỀ XUẤT — chưa đóng băng**. Chờ người dùng duyệt danh sách trước khi viết nội dung chi tiết (setup, các bước, lỗi thường gặp, lưu ý) và triển khai animation.
+Trạng thái: **ĐÃ DUYỆT & ĐÓNG BĂNG (CỔNG DUYỆT 1, 2026-10-08)**. Tier label chỉ dùng nội bộ để tuyển chọn — app không hiển thị (D-012).
 
 Ngày tra cứu: **2026-10-08**.
 
@@ -163,7 +163,10 @@ Ký hiệu thiết bị: BB barbell, DB dumbbell, MC machine, CB cable, BW bodyw
 
 Gán cơ chính/phụ trên là mô tả **nhóm cơ nhắm tới**, không phải mức activation đo được.
 
-## 5. Câu hỏi duyệt (CỔNG DUYỆT 1)
+## 5. Kết quả CỔNG DUYỆT 1
+Danh sách: OK. Tier: không hiển thị trong app. Prototype: 4 bài như đề xuất.
+
+### Câu hỏi đã trình (lưu vết)
 1. Duyệt danh sách 40 bài (thêm/bớt/đổi)?
 2. Nhãn tier: hiển thị trong app kèm cảnh báo "chờ đối chiếu", hay chỉ hiển thị "Được tuyển chọn cho hypertrophy" cho đến khi đối chiếu được nguồn gốc?
 3. Bài cho prototype CỔNG DUYỆT 2 (đề xuất): đứng — `dumbbell_lateral_raise`; nằm ghế — `barbell_bench_press`; cable — `seated_cable_row`; máy — `leg_extension`.

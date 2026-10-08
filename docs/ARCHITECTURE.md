@@ -58,7 +58,10 @@ Tách lớp: `shared/domain` (thuần, không IO) → `server/*Repository` (D1) 
 
 ## 4. Auth & bảo mật
 
-### 4.1 Password hashing — ⚠️ BLOCKER cần duyệt (CỔNG DUYỆT 1)
+### 4.1 Password hashing — ĐÃ CHỐT: PBKDF2-SHA256 server-side (D-007)
+Chủ dự án chọn phương án đơn giản nhất. Triển khai: `crypto.subtle.deriveBits` PBKDF2-SHA256, salt 16 byte, iteration chọn theo đo đạc ở Giai đoạn 2 để vừa 10 ms CPU, lưu params để nâng cấp; so sánh constant-time. Phần dưới là phân tích ban đầu, giữ để tham khảo.
+
+#### Phân tích ban đầu
 Sự kiện đã kiểm chứng:
 - Workers Free: **10 ms CPU/HTTP request** (Cloudflare docs, Workers limits, kiểm tra 2026-10-08). Có "flexibility" cho vượt ngưỡng không thường xuyên, nhưng vượt thường xuyên sẽ bị terminate.
 - Đo trên workerd local (wrangler 4.x, container dev này, CPU không công bố): PBKDF2-SHA256 100.000 iterations ≈ 25–30 ms; 600.000 iterations ≈ 60–90 ms wall time. Không có trần iteration ở workerd local (600.000 chạy được). Số đo production chưa kiểm chứng.
@@ -68,7 +71,7 @@ Sự kiện đã kiểm chứng:
 
 Phương án đề xuất (**A — server relief / client-side KDF**):
 1. Client gọi `POST /api/auth/prelogin {username}` → server trả `{salt, params}`. Với username không tồn tại, trả salt giả xác định bằng `HMAC(PEPPER_SECRET, username)` để không lộ username tồn tại.
-2. Browser tính `k = Argon2id(password, salt, m=19 MiB, t=2, p=1)` (tham số tối thiểu OWASP cho Argon2id) bằng WASM (`hash-wasm`, MIT ⏳ kiểm tra license/bundle khi code).
+2. (không triển khai) Browser tính `k = Argon2id(password, salt, m=19 MiB, t=2, p=1)` (tham số tối thiểu OWASP cho Argon2id) bằng WASM (`hash-wasm`, MIT ⏳ kiểm tra license/bundle khi code).
 3. Client gửi `k` (không gửi mật khẩu gốc). Server lưu `H = HMAC-SHA256(PEPPER_SECRET, k)` và so sánh constant-time. CPU server < 1 ms.
 - Khả năng chống offline cracking khi lộ DB: attacker vẫn phải chạy Argon2id cho mỗi lần đoán (+ cần pepper). Nếu lộ DB: `H` không dùng để đăng nhập trực tiếp được (cần `k`, mà `k` là preimage HMAC).
 - Đánh đổi: `k` là password-equivalent khi truyền (được bảo vệ bởi TLS, như mật khẩu thường); đăng nhập trên điện thoại yếu mất ~0,5–1,5 s ⏳ đo ở Giai đoạn 2; cần JS bật.

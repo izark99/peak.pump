@@ -59,7 +59,7 @@ Nguồn: https://developers.cloudflare.com/workers/platform/pricing/#d1, changel
 1. **Chạy local**: `pnpm install` → `pnpm db:migrate:local` → `pnpm dev` (Vite + `wrangler pages dev` với D1 local).
 2. **Tạo D1** (cần cho phép): `wrangler d1 create peak-pump-prod` → ghi `database_id` vào `wrangler.toml` (ID không phải secret).
 3. **Migrations**: `wrangler d1 migrations apply peak-pump-prod --remote`. Migration destructive cần phê duyệt riêng + backup trước.
-4. **Secrets**: `PEPPER_SECRET` đặt bằng `wrangler pages secret put PEPPER_SECRET` (không commit; `.env.example` chỉ có tên biến).
+4. **Secrets**: hiện không cần secret bắt buộc (D-007 dùng PBKDF2 không pepper). Nếu thêm secret sau này: `wrangler pages secret put <NAME>`, không commit; `.env.example` chỉ có tên biến.
 5. **Bootstrap admin**: `pnpm bootstrap-admin` (xem `ARCHITECTURE.md` §4.5).
 6. **Build**: `pnpm build` → `dist/` + `functions/`.
 7. **Deploy Pages** (cần cho phép): `wrangler pages deploy dist --project-name peak-pump`.

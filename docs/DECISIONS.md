@@ -20,7 +20,10 @@ Idempotent retry không cần bảng idempotency riêng; pull tăng dần theo i
 ## D-006 · 2026-10-08 · Accepted — CSRF: SameSite=Strict + Origin check + custom header
 Không CORS. Không cần token đồng bộ phức tạp với SPA same-origin.
 
-## D-007 · 2026-10-08 · **Pending approval (CỔNG DUYỆT 1)** — Password hashing: client-side Argon2id + server HMAC-SHA256 với pepper
+## D-007 · 2026-10-08 · **Accepted (CỔNG DUYỆT 1, chủ dự án chọn "đơn giản nhất")** — Password hashing: PBKDF2-SHA256 server-side (WebCrypto), iteration chọn vừa ngân sách CPU
+Quyết định cuối: dùng PBKDF2-SHA256 qua `crypto.subtle` ở server, salt ngẫu nhiên 16 byte/user, lưu `{alg, iterations, salt, hash}` để nâng tham số sau (rehash khi đăng nhập thành công). Iteration chọn ở Giai đoạn 2 theo đo đạc sao cho CPU đăng nhập nằm trong ngân sách Workers Free; **thấp hơn khuyến nghị OWASP (600k)** — đánh đổi đã được chủ dự án chấp nhận. Không plaintext, không reversible. Phương án Argon2id client-side dưới đây không triển khai.
+
+Phân tích ban đầu (lưu lại để tham khảo) — client-side Argon2id + server HMAC-SHA256 với pepper:
 Đo local: PBKDF2-SHA256 600k ≈ 60–90 ms ≫ 10 ms CPU Workers Free. Phương án đề xuất giữ chi phí brute-force offline ở mức Argon2id (m=19 MiB, t=2, p=1) mà server tốn < 1 ms. Đánh đổi: giá trị KDF là password-equivalent khi truyền (TLS bảo vệ); đăng nhập chậm hơn trên điện thoại yếu; phụ thuộc WASM. Phương án thay thế: PBKDF2 600k server-side (rủi ro bị terminate, cần thử trên account thật). Workers Paid bị loại.
 
 ## D-008 · 2026-10-08 · Accepted — Excel parse trên trình duyệt, server validate lại
@@ -35,5 +38,8 @@ Cho bề mặt liền, silhouette cơ bắp rõ, deform ở khớp. Rủi ro: th
 ## D-011 · 2026-10-08 · Proposed — PDF bằng pdfmake + font Noto Sans/Be Vietnam Pro (SIL OFL)
 Hỗ trợ `headerRows` lặp lại, page break, embed TTF. Chốt ở Giai đoạn 6 ⏳ (kiểm tra cách lấy file font OFL vào repo khi network bị giới hạn).
 
-## D-012 · 2026-10-08 · Accepted — Tier label chỉ hiển thị khi nguồn có nhãn và đã đối chiếu
-Hiện tại tier lấy từ bản tóm tắt thứ cấp, chưa đối chiếu nguồn gốc (egress bị chặn). Chờ quyết định ở CỔNG DUYỆT 1.
+## D-012 · 2026-10-08 · Accepted (CỔNG DUYỆT 1) — Không hiển thị tier label trong app
+Tier S/A chỉ là tiêu chí tìm bài. App hiển thị "Được tuyển chọn cho hypertrophy"; nguồn tuyển chọn chỉ nằm trong `docs/EXERCISE_SOURCES.md`.
+
+## D-013 · 2026-10-08 · Accepted (CỔNG DUYỆT 1) — Đóng băng thư viện 40 bài
+Danh sách trong `docs/EXERCISE_SOURCES.md` §3 được duyệt nguyên trạng. Prototype 3D: neutral stance, `dumbbell_lateral_raise`, `barbell_bench_press`, `seated_cable_row`, `leg_extension`.

@@ -20,9 +20,9 @@ users(
   display_name TEXT,
   role TEXT NOT NULL CHECK(role IN ('user','admin')),
   status TEXT NOT NULL CHECK(status IN ('active','locked')),
-  pw_hash BLOB NOT NULL,             -- HMAC-SHA256(pepper, clientKdfOutput) (xem ARCHITECTURE §4.1, chờ duyệt)
-  pw_salt BLOB NOT NULL,
-  pw_params TEXT NOT NULL,           -- JSON {alg:'argon2id', m, t, p, v}
+  pw_hash BLOB NOT NULL,             -- PBKDF2-SHA256 output 32 byte (D-007)
+  pw_salt BLOB NOT NULL,             -- 16 byte random
+  pw_params TEXT NOT NULL,           -- JSON {alg:'pbkdf2-sha256', iterations}
   must_change_pw INTEGER NOT NULL DEFAULT 0,
   change_seq INTEGER NOT NULL DEFAULT 0,  -- counter đồng bộ per user
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
